@@ -1,0 +1,1 @@
+Discord bot for automated 3x3s 

@@ -75,30 +75,13 @@ Run the bot locally or on a worker with:
 uv run fmdiscordbot
 ```
 
-The bot reads these required environment variables:
+environment variables:
 
 * `DISCORD_TOKEN`
 * `LASTFM_API_KEY`
 * `LASTFM_API_SECRET`
 
-
-The GitHub Actions workflow in `.github/workflows/weekly-update.yml` runs the
-one-shot worker at 08:00 `America/Chicago` every Friday. GitHub repository
-secrets must provide the required API credentials. Add repository variables
-`DISCORD_CHANNEL_ID` and `WEEKLY_USERNAMES` (a comma-separated Last.fm username
-list) for the scheduled job.
-
-The one-shot command is:
-
+one shot command 
 ```bash
 uv run fmdiscordbot --once
 ```
-
-It uses `DISCORD_CHANNEL_ID` and `WEEKLY_USERNAMES`, so the scheduled workflow
-does not need to check in local runtime state.
-
-For Railway:
-
-* Add the repository as a Python service.
-* Set the start command to `uv run fmdiscordbot`.
-* Configure the required variables above.
