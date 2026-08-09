@@ -1,0 +1,42 @@
+name: Weekly Discord update
+
+on:
+  schedule:
+    # GitHub cron is UTC. These two entries cover 08:00 America/Chicago across DST.
+    - cron: "0 13 * * 5"
+    - cron: "0 14 * * 5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  weekly-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --locked
+
+      - name: Resolve local schedule time
+        id: local_time
+        run: echo "hour=$(TZ=America/Chicago date +%H)" >> "$GITHUB_OUTPUT"
+
+      - name: Run weekly update at 08:00 America/Chicago
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.local_time.outputs.hour == '08')
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+          DISCORD_CHANNEL_ID: ${{ vars.DISCORD_CHANNEL_ID }}
+          WEEKLY_USERNAMES: ${{ vars.WEEKLY_USERNAMES }}
+          DB_FILE: /tmp/users.json
+        run: uv run fmdiscordbot --once

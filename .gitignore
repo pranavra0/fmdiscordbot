@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# uv
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+.venv/
+
+# Local configuration and runtime state
+.env
+.env.*
+!.env.example
+users.json
+lastfm_api.txt
+
+# Editor and temporary files
+.vscode/
+.idea/
+*.swp
+tempCodeRunnerFile.py
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ty_cache/
+.coverage
+htmlcov/

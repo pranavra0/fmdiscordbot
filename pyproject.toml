@@ -1,0 +1,48 @@
+[project]
+name = "fm-discord-bot"
+version = "0.1.0"
+description = "A Discord bot for sharing Last.fm charts."
+requires-python = ">=3.12"
+dependencies = [
+    "discord.py>=2.5.2",
+    "pillow>=11.1.0",
+    "pylast>=5.3.0",
+    "python-dotenv>=1.1.0",
+    "requests>=2.32.3",
+]
+
+[project.scripts]
+fmdiscordbot = "fmdiscordbot.bot:main"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.11.0",
+    "ty>=0.0.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.9"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "fmdiscordbot"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ANN", "ASYNC", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/fmdiscordbot/bot.py" = ["E501"]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.rules]
+possibly-unresolved-reference = "error"
+possibly-missing-attribute = "error"
+
+[tool.uv]
+default-groups = ["dev"]
