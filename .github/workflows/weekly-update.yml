@@ -2,10 +2,17 @@ name: Weekly Discord update
 
 on:
   schedule:
-    # GitHub cron is UTC. These two entries cover 08:00 America/Chicago across DST.
-    - cron: "0 13 * * 5"
-    - cron: "0 14 * * 5"
+    # GitHub cron is UTC. Retry hourly after the target time so a delayed or
+    # failed run can catch up on Friday; state prevents duplicate updates.
+    - cron: "15 13-23 * * 5"
+    # 13:15 UTC is 09:15 EDT; 14:15 UTC is 09:15 EST.
+
   workflow_dispatch:
+
+concurrency:
+  group: weekly-update
+  cancel-in-progress: false
+
 
 permissions:
   contents: read
@@ -15,23 +22,67 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+
+      - name: Resolve local schedule time
+        id: local_time
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          echo "date=$(TZ=America/New_York date +%F)" >> "$GITHUB_OUTPUT"
+          echo "week=$(TZ=America/New_York date +%G-%V)" >> "$GITHUB_OUTPUT"
+          weekday="$(TZ=America/New_York date +%u)"
+          hour="$(TZ=America/New_York date +%H)"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || { [ "$weekday" = "5" ] && [ "$hour" -ge "09" ]; }; then
+            echo "check_state=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "check_state=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore weekly state
+        id: weekly_state
+        if: steps.local_time.outputs.check_state == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/users.json
+          key: weekly-update-${{ steps.local_time.outputs.week }}
+
+      - name: Decide whether this week already ran
+        id: run_check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LOCAL_DATE: ${{ steps.local_time.outputs.date }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          last_run_date=""
+          if [ -f /tmp/users.json ]; then
+            last_run_date="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("last_auto_run_date") or "")' /tmp/users.json 2>/dev/null || true)"
+          fi
+
+          if [ "${{ steps.local_time.outputs.check_state }}" = "true" ] && [ "$last_run_date" != "$LOCAL_DATE" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Check out repository
+        if: steps.run_check.outputs.should_run == 'true'
         uses: actions/checkout@v4
 
       - name: Install uv
+        if: steps.run_check.outputs.should_run == 'true'
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
       - name: Install locked dependencies
+        if: steps.run_check.outputs.should_run == 'true'
         run: uv sync --locked
 
-      - name: Resolve local schedule time
-        id: local_time
-        run: echo "hour=$(TZ=America/Chicago date +%H)" >> "$GITHUB_OUTPUT"
-
-      - name: Run weekly update at 08:00 America/Chicago
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && steps.local_time.outputs.hour == '08')
+      - name: Run weekly update at 09:00 America/New_York
+        if: steps.run_check.outputs.should_run == 'true'
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
@@ -40,3 +91,10 @@ jobs:
           WEEKLY_USERNAMES: ${{ vars.WEEKLY_USERNAMES }}
           DB_FILE: /tmp/users.json
         run: uv run fmdiscordbot --once
+
+      - name: Save successful weekly state
+        if: success() && steps.run_check.outputs.should_run == 'true' && steps.weekly_state.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/users.json
+          key: weekly-update-${{ steps.local_time.outputs.week }}
