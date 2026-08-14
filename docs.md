@@ -4,11 +4,12 @@ This documentation reflects the functionality present in the current source code
 
 ## Technical Overview
 
-The bot generates 300x300 pixel album tiles in a 3x3 grid (900x900 total). Each tile includes a text overlay displaying the artist name and album title. If an album cover is unavailable, a gray placeholder is rendered behind the text.
-
 After the weekly chart run, the bot posts each user's generated chart to the configured Discord channel.
 
-The bot is designed to run as an always-on Discord process. That allows both manual commands and the automatic Friday post scheduler to work from the same bot instance.
+The bot can run as an always-on Discord process for interactive commands. Friday scheduling is
+owned by the GitHub Actions workflow by default; set `ENABLE_INTERNAL_SCHEDULER=true` only when
+the always-on process should own scheduling instead. Do not enable both schedulers for the same
+channel.
 
 ### Development with uv
 
@@ -40,14 +41,22 @@ These commands require **Administrator** permissions.
 
 | Command | Argument | Description |
 | --- | --- | --- |
-| `!setchannel` | None | Registers the current channel as the destination for batch weekly updates. |
-| `!adduser` | `<username>` | Appends a Last.fm username to `users.json` for inclusion in batch updates. |
-| `!runweekly` | None | Manually triggers 7-day chart generation for every user in the database. |
-| `!chart` | `<username> [period]` | Generates a chart for one Last.fm account. |
+| `!setchannel` / `/setchannel` | None | Registers the current channel as the destination for weekly updates. |
+| `!adduser` / `/adduser` | `<username>` | Adds a Last.fm username to `users.json`. |
+| `!removeuser` / `/removeuser` | `<username>` | Removes a persisted Last.fm username. |
+| `!users` / `/users` | None | Lists the usernames included in weekly updates. |
+| `!runweekly` / `/runweekly` | None | Manually triggers 7-day chart generation for every configured user. |
+| `!status` / `/status` | None | Shows the configured channel, user count, last run, and scheduler mode. |
+| `!chart` / `/chart` | `<username> [period]` | Generates a chart for one Last.fm account. |
 
-The bot also checks automatically in the `America/Chicago` timezone and posts the weekly chart batch every Friday to the configured channel.
+Owner-only maintenance commands:
 
----
+| Command | Argument | Description |
+| --- | --- | --- |
+| `!reload` / `/reload` | None | Validates and reloads persisted runtime data. |
+| `!clearusers` / `/clearusers` | `[yes]` | Clears persisted users after `yes` confirmation. |
+
+The bot also exposes `/` versions of the commands through Discord slash-command synchronization.
 
 ## General Commands
 
@@ -58,16 +67,18 @@ Available to all users.
 Generates a 3x3 chart for a specific Last.fm account.
 
 * **username**: The target Last.fm account name (required).
-* **period**: The timeframe for the data. Options: `7day` (default), `1month`, `3month`, `6month`, `12month`, `overall`.
+* **period**: One of `7day` (default), `1month`, `3month`, `6month`, `12month`, or `overall`.
 
----
+Chart requests have a 30-second per-user cooldown to avoid exhausting the Last.fm API.
 
+### `!about` / `/about`
 
----
+Shows a short description and command hint.
+
 ## Hosting and scheduled updates
 
-For the interactive bot, use an always-on worker/service. A once-per-week job
-alone cannot support commands such as `!chart` and `!runweekly`.
+For interactive commands, use an always-on worker/service. A once-per-week job alone cannot
+support commands such as `!chart` and `!runweekly`.
 
 Run the bot locally or on a worker with:
 
@@ -75,13 +86,27 @@ Run the bot locally or on a worker with:
 uv run fmdiscordbot
 ```
 
-environment variables:
+The scheduled workflow runs at 09:00 America/New_York on Friday. This timezone follows the
+workflow's EST/EDT standard and handles daylight saving time correctly.
+
+Required environment variables:
 
 * `DISCORD_TOKEN`
 * `LASTFM_API_KEY`
 * `LASTFM_API_SECRET`
 
-one shot command 
+Optional environment variables:
+
+* `DISCORD_CHANNEL_ID`
+* `WEEKLY_USERNAMES`
+* `DB_FILE` (defaults to `users.json`)
+* `ENABLE_INTERNAL_SCHEDULER` (defaults to `false`)
+
+One-shot command:
+
 ```bash
 uv run fmdiscordbot --once
 ```
+
+Use either the GitHub Actions workflow or `ENABLE_INTERNAL_SCHEDULER=true` for Friday
+scheduling, not both.

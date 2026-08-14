@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 from zoneinfo import ZoneInfo
 
 import discord
@@ -24,7 +24,8 @@ from PIL import Image, ImageDraw, ImageFont
 load_dotenv()
 
 LOGGER = logging.getLogger(__name__)
-BOT_TIMEZONE = ZoneInfo("America/Chicago")
+BOT_TIMEZONE = ZoneInfo("America/New_York")
+VALID_PERIODS = ("7day", "1month", "3month", "6month", "12month", "overall")
 
 
 class ConfigurationError(RuntimeError):
@@ -48,6 +49,7 @@ class Settings:
     db_file: Path
     channel_id: int | None
     usernames: tuple[str, ...]
+    enable_internal_scheduler: bool
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -62,6 +64,9 @@ class Settings:
             for username in os.getenv("WEEKLY_USERNAMES", "").split(",")
             if username.strip()
         )
+        scheduler_value = os.getenv("ENABLE_INTERNAL_SCHEDULER", "false").strip().lower()
+        if scheduler_value not in {"true", "false"}:
+            raise ConfigurationError("ENABLE_INTERNAL_SCHEDULER must be true or false.")
         return cls(
             discord_token=os.getenv("DISCORD_TOKEN"),
             lastfm_api_key=os.getenv("LASTFM_API_KEY"),
@@ -69,6 +74,7 @@ class Settings:
             db_file=Path(os.getenv("DB_FILE") or "users.json"),
             channel_id=channel_id,
             usernames=usernames,
+            enable_internal_scheduler=scheduler_value == "true",
         )
 
     def validate(self) -> None:
@@ -88,6 +94,8 @@ SETTINGS = Settings.from_environment()
 NETWORK: pylast.LastFMNetwork | None = None
 RUN_ONCE = False
 RUN_ONCE_FAILED = False
+COMMANDS_SYNCED = False
+WEEKLY_UPDATE_LOCK = asyncio.Lock()
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -185,27 +193,48 @@ async def safe_send(
             await asyncio.sleep(wait)
 
 
+def _chart_filename(username: str, period: str) -> str:
+    safe_username = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in username
+    )[:64]
+    return f"{safe_username or 'chart'}_{period}.png"
+
+
+def _effective_usernames(data: UserData) -> list[str]:
+    return data["usernames"] or list(SETTINGS.usernames)
+
+
+def _format_last_run(timestamp: float | None) -> str:
+    if timestamp is None:
+        return "never"
+    return datetime.fromtimestamp(timestamp, BOT_TIMEZONE).strftime("%Y-%m-%d %H:%M %Z")
+
+
 async def send_weekly_update(channel: discord.abc.Messageable) -> tuple[bool, str | None]:
-    data = load_data()
-    usernames = data["usernames"] or list(SETTINGS.usernames)
+    async with WEEKLY_UPDATE_LOCK:
+        data = load_data()
+        usernames = data["usernames"] or list(SETTINGS.usernames)
 
-    if not usernames:
-        return False, "User list is empty. Add users with !adduser or WEEKLY_USERNAMES."
+        if not usernames:
+            return False, "User list is empty. Add users with !adduser or WEEKLY_USERNAMES."
 
-    for username in usernames:
-        img_buffer = await asyncio.get_running_loop().run_in_executor(
-            None, get_chart_image, username, "7day"
-        )
+        for username in usernames:
+            img_buffer = await asyncio.get_running_loop().run_in_executor(
+                None, get_chart_image, username, "7day"
+            )
 
-        if img_buffer:
-            file = discord.File(fp=img_buffer, filename=f"{username}_weekly.png")
-            await safe_send(channel, content=f"Weekly chart for {username}", file=file)
-        else:
-            await safe_send(channel, content=f"Could not generate chart for {username}.")
+            if img_buffer:
+                file = discord.File(fp=img_buffer, filename=_chart_filename(username, "7day"))
+                await safe_send(channel, content=f"Weekly 7-day chart for {username}", file=file)
+            else:
+                await safe_send(
+                    channel, content=f"Could not generate a 7-day chart for {username}."
+                )
 
-        await asyncio.sleep(2)
+            await asyncio.sleep(2)
 
-    return True, None
+        return True, None
 
 
 # --- IMAGE GENERATION LOGIC ---
@@ -318,9 +347,17 @@ async def _run_once() -> None:
 
 @bot.event
 async def on_ready() -> None:
-    global RUN_ONCE_FAILED
+    global COMMANDS_SYNCED, RUN_ONCE_FAILED
 
     LOGGER.info("Logged in as %s.", bot.user)
+    if not COMMANDS_SYNCED:
+        try:
+            await bot.tree.sync()
+            COMMANDS_SYNCED = True
+            LOGGER.info("Slash commands synchronized.")
+        except discord.DiscordException:
+            LOGGER.exception("Could not synchronize slash commands.")
+
     if RUN_ONCE:
         try:
             await _run_once()
@@ -331,8 +368,10 @@ async def on_ready() -> None:
             await bot.close()
         return
 
-    if not auto_weekly_runner.is_running():
+    if SETTINGS.enable_internal_scheduler and not auto_weekly_runner.is_running():
         auto_weekly_runner.start()
+    elif not SETTINGS.enable_internal_scheduler:
+        LOGGER.info("Internal scheduler disabled; use the weekly-update workflow.")
 
 
 @tasks.loop(minutes=30)
@@ -370,7 +409,7 @@ async def before_auto_weekly_runner() -> None:
     await bot.wait_until_ready()
 
 
-@bot.command()
+@bot.hybrid_command()
 @commands.has_permissions(administrator=True)
 async def runweekly(ctx: commands.Context[Any]) -> None:
     """Manually trigger the weekly update for all configured users."""
@@ -397,13 +436,19 @@ async def runweekly(ctx: commands.Context[Any]) -> None:
     await ctx.send("Weekly update complete.")
 
 
-@bot.command()
+@bot.hybrid_command()
+@commands.cooldown(1, 30, commands.BucketType.user)
 async def chart(
-    ctx: commands.Context[Any], username: str | None = None, period: str = "7day"
+    ctx: Any,  # noqa: ANN401 - discord.py hybrid-command typing is incomplete
+    username: str | None = None,
+    period: Literal["7day", "1month", "3month", "6month", "12month", "overall"] = "7day",
 ) -> None:
     """Request a chart for a Last.fm username."""
     if not username:
         await ctx.send("Provide a username.")
+        return
+    if period not in VALID_PERIODS:
+        await ctx.send(f"Invalid period. Choose one of: {', '.join(VALID_PERIODS)}.")
         return
 
     await ctx.send(f"Generating {period} chart for {username}.")
@@ -411,32 +456,141 @@ async def chart(
         None, get_chart_image, username, period
     )
     if img_buffer:
-        await ctx.send(file=discord.File(fp=img_buffer, filename=f"{username}_chart.png"))
+        await ctx.send(file=discord.File(fp=img_buffer, filename=_chart_filename(username, period)))
     else:
-        await ctx.send(f"Error retrieving data for {username}.")
+        await ctx.send(f"Error retrieving the {period} chart for {username}.")
 
 
-@bot.command()
+@bot.hybrid_command()
 @commands.has_permissions(administrator=True)
-async def adduser(ctx: commands.Context[Any], username: str) -> None:
+async def adduser(ctx: Any, username: str | None = None) -> None:  # noqa: ANN401
     """Add a Last.fm username to the weekly update list."""
+    if not username:
+        await ctx.send("Provide a Last.fm username.")
+        return
+    username = username.strip()
+
     data = load_data()
-    if username not in data["usernames"]:
-        data["usernames"].append(username)
-        save_data(data)
-        await ctx.send(f"Added {username}.")
-    else:
+    if any(existing.casefold() == username.casefold() for existing in data["usernames"]):
         await ctx.send("User already exists.")
+        return
+    if not data["usernames"]:
+        data["usernames"] = _effective_usernames(data)
+    if any(existing.casefold() == username.casefold() for existing in data["usernames"]):
+        await ctx.send("User already exists.")
+        return
+    data["usernames"].append(username)
+    save_data(data)
+    await ctx.send(f"Added {username}.")
 
 
-@bot.command()
+@bot.hybrid_command()
+@commands.has_permissions(administrator=True)
+async def removeuser(ctx: Any, username: str | None = None) -> None:  # noqa: ANN401
+    """Remove a Last.fm username from the weekly update list."""
+    if not username:
+        await ctx.send("Provide a Last.fm username.")
+        return
+    username = username.strip()
+    data = load_data()
+    for index, existing in enumerate(data["usernames"]):
+        if existing.casefold() == username.casefold():
+            data["usernames"].pop(index)
+            save_data(data)
+            await ctx.send(f"Removed {existing}.")
+            return
+    if not data["usernames"] and SETTINGS.usernames:
+        await ctx.send("These users come from WEEKLY_USERNAMES; remove them from the environment.")
+    else:
+        await ctx.send("User is not configured.")
+
+
+@bot.hybrid_command()
+@commands.has_permissions(administrator=True)
+async def users(ctx: commands.Context[Any]) -> None:
+    """List Last.fm usernames included in weekly updates."""
+    data = load_data()
+    usernames = _effective_usernames(data)
+    if not usernames:
+        await ctx.send("No users configured.")
+        return
+    source = "users.json" if data["usernames"] else "WEEKLY_USERNAMES"
+    listing = "\n".join(f"{index}. {username}" for index, username in enumerate(usernames, 1))
+    await ctx.send(f"Weekly users ({source}):\n{listing}")
+
+
+@bot.hybrid_command()
+@commands.has_permissions(administrator=True)
+async def status(ctx: commands.Context[Any]) -> None:
+    """Show bot configuration and the last successful weekly run."""
+    data = load_data()
+    channel_id = data["config_channel"] or SETTINGS.channel_id
+    channel = f"<#{channel_id}>" if channel_id else "not configured"
+    scheduler = "enabled" if SETTINGS.enable_internal_scheduler else "workflow-only"
+    await ctx.send(
+        f"Channel: {channel}\n"
+        f"Weekly users: {len(_effective_usernames(data))}\n"
+        f"Last successful run: {_format_last_run(data['last_run'])}\n"
+        f"Scheduler: {scheduler} ({BOT_TIMEZONE.key})"
+    )
+
+
+@bot.hybrid_command()
+async def about(ctx: commands.Context[Any]) -> None:
+    """Show a short description of the bot."""
+    await ctx.send(
+        "Last.fm 3x3 chart bot. Use `!chart <username> [period]` or `/chart` to generate a chart."
+    )
+
+
+@bot.hybrid_command()
 @commands.has_permissions(administrator=True)
 async def setchannel(ctx: commands.Context[Any]) -> None:
     """Set the current channel as the weekly update destination."""
     data = load_data()
     data["config_channel"] = ctx.channel.id
     save_data(data)
-    await ctx.send(f"Channel set to {ctx.channel.id}.")
+    await ctx.send(f"Weekly updates will be posted in <#{ctx.channel.id}>.")
+
+
+@bot.hybrid_command()
+@commands.is_owner()
+async def reload(ctx: commands.Context[Any]) -> None:
+    """Validate and reload persisted runtime data."""
+    data = load_data()
+    await ctx.send(f"Reloaded runtime data: {len(_effective_usernames(data))} weekly users.")
+
+
+@bot.hybrid_command()
+@commands.is_owner()
+async def clearusers(ctx: commands.Context[Any], confirmation: str = "") -> None:
+    """Clear persisted weekly users after an explicit confirmation."""
+    if confirmation.casefold() != "yes":
+        await ctx.send("This removes persisted users. Run `!clearusers yes` to confirm.")
+        return
+    data = load_data()
+    data["usernames"] = []
+    save_data(data)
+    await ctx.send("Persisted weekly users cleared.")
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context[Any], error: commands.CommandError) -> None:
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(f"Try again in {error.retry_after:.0f} seconds.")
+        return
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("You need Administrator permission for that command.")
+        return
+    if isinstance(error, commands.NotOwner):
+        await ctx.send("Only the bot owner can use that command.")
+        return
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"Missing argument: `{error.param.name}`.")
+        return
+    LOGGER.error("Unhandled command error: %s", error)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
