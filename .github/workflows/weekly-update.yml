@@ -2,10 +2,12 @@ name: Weekly Discord update
 
 on:
   schedule:
-    # GitHub cron is UTC. Retry hourly after the target time so a delayed or
-    # failed run can catch up on Friday; state prevents duplicate updates.
-    - cron: "15 13-23 * * 5"
-    # 13:15 UTC is 09:15 EDT; 14:15 UTC is 09:15 EST.
+    # Start at 09:15 Friday, then retry every 5 minutes.
+    - cron: "15-59/5 9 * * 5"
+      timezone: "America/New_York"
+
+    - cron: "*/5 10-19 * * 5"
+      timezone: "America/New_York"
 
   workflow_dispatch:
 
